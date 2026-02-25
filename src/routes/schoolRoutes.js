@@ -4,16 +4,16 @@ const schoolController = require('../controllers/schoolController');
 const authMiddleware = require('../middleware/authMiddleware');
 const authorize = require('../middleware/roleMiddleware');
 
-const { parser } = require('../utils/cloudinaryConfig');
+const { parser, cloudinaryUpload } = require('../utils/cloudinaryConfig');
 
 // Public Routes
-router.post('/register', parser.single('logo'), schoolController.registerSchool); // Uses Multer inside controller or middleware
+router.post('/register', parser.single('logo'), cloudinaryUpload, schoolController.registerSchool);
 router.post('/verify-email', schoolController.verifyEmail);
 router.get('/public/:schoolId', schoolController.getPublicSchoolInfo); // Direct ID
 router.get('/invite-info/:token', schoolController.getInviteInfo); // Validate Token & Get Info
 router.get('/ref-info/:refId', schoolController.getSchoolByRefId); // Validate Ref & Get Info
-router.post('/signup/teacher', parser.single('profilePicture'), schoolController.registerTeacher); // Use invite + profile pic
-router.post('/signup/student', parser.single('profilePicture'), schoolController.registerStudent); // Use ref ID + profile pic
+router.post('/signup/teacher', parser.single('profilePicture'), cloudinaryUpload, schoolController.registerTeacher);
+router.post('/signup/student', parser.single('profilePicture'), cloudinaryUpload, schoolController.registerStudent);
 
 // Protected Routes (School Admin Only)
 router.use(authMiddleware);

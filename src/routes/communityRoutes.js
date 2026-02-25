@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const communityController = require('../controllers/communityController');
 const { authenticate } = require('../middleware/auth');
-const { parser } = require('../utils/cloudinaryConfig');
+const { parser, cloudinaryUpload } = require('../utils/cloudinaryConfig');
 
 // All routes require authentication
 router.use(authenticate);
@@ -17,6 +17,6 @@ router.post('/create', communityController.createPost);
 router.post('/like', communityController.toggleLike);
 
 // Upload Attachment
-router.post('/upload', parser.single('file'), communityController.uploadAttachment);
+router.post('/upload', parser.single('file'), cloudinaryUpload, communityController.uploadAttachment);
 
 module.exports = router;

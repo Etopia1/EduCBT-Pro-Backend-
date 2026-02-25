@@ -14,10 +14,10 @@ exports.registerSchool = async (req, res) => {
     const { schoolName, schoolEmail, phone, address, location, adminName, adminPassword } = req.body;
 
     // Check for file (Cloudinary)
-    if (!req.file || !req.file.path) {
+    if (!req.cloudinaryResult) {
         return res.status(400).json({ message: 'School Logo is required (Image upload)' });
     }
-    const logoUrl = req.file.path;
+    const logoUrl = req.cloudinaryResult.secure_url;
 
     try {
         const existingSchool = await School.findOne({ email: schoolEmail });
@@ -158,7 +158,7 @@ exports.registerTeacher = async (req, res) => {
     }
 
     // Get profile picture URL from uploaded file
-    const profilePicture = req.file?.path || null;
+    const profilePicture = req.cloudinaryResult?.secure_url || null;
 
     try {
         let school = null;
@@ -299,7 +299,7 @@ exports.registerStudent = async (req, res) => {
     const { schoolRefId, schoolId, fullName, classLevel, password, location, phone, dateOfBirth, gender } = req.body;
 
     // Get profile picture URL from uploaded file
-    const profilePicture = req.file?.path || null;
+    const profilePicture = req.cloudinaryResult?.secure_url || null;
 
     try {
         let school;

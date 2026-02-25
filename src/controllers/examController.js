@@ -479,11 +479,11 @@ exports.deleteExam = async (req, res) => {
 // --- IMAGE UPLOAD ---
 exports.uploadQuestionImage = async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ message: "No image uploaded" });
+        if (!req.cloudinaryResult) {
+            return res.status(400).json({ message: "No image uploaded or upload failed" });
         }
-        // Return the Cloudinary URL
-        res.json({ imageUrl: req.file.path });
+        // Return the Cloudinary URL from the upload result
+        res.json({ imageUrl: req.cloudinaryResult.secure_url });
     } catch (error) {
         console.error("Image Upload Error:", error);
         res.status(500).json({ message: "Failed to upload image" });

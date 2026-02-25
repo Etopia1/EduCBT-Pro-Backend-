@@ -5,12 +5,12 @@ const authMiddleware = require('../middleware/authMiddleware');
 const authorize = require('../middleware/roleMiddleware');
 const { validateExamType, checkFeatureLimits } = require('../middleware/subscription');
 
-const { parser } = require('../utils/cloudinaryConfig');
+const { parser, cloudinaryUpload } = require('../utils/cloudinaryConfig');
 
 // --- TEACHER ROUTES (STRICT CONTROL) ---
 // Only 'teacher' role can create or manage exams
 router.post('/create', [authMiddleware, authorize('teacher'), validateExamType, checkFeatureLimits('exams')], controller.createExam);
-router.post('/teacher/upload-image', [authMiddleware, authorize('teacher')], parser.single('image'), controller.uploadQuestionImage);
+router.post('/teacher/upload-image', [authMiddleware, authorize('teacher')], parser.single('image'), cloudinaryUpload, controller.uploadQuestionImage);
 router.get('/teacher/all', [authMiddleware, authorize('teacher')], controller.getTeacherExams);
 
 // --- STUDENT ROUTES ---

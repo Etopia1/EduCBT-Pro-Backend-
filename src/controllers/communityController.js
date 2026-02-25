@@ -86,6 +86,10 @@ exports.uploadAttachment = async (req, res) => {
             return res.status(400).json({ message: 'No file uploaded' });
         }
 
+        if (!req.cloudinaryResult) {
+            return res.status(500).json({ message: 'File upload to Cloudinary failed' });
+        }
+
         // Determine type based on mimetype
         const mime = req.file.mimetype;
         let type = 'document';
@@ -93,10 +97,10 @@ exports.uploadAttachment = async (req, res) => {
         if (mime.startsWith('video/')) type = 'video';
 
         res.json({
-            url: req.file.path, // Cloudinary URL
+            url: req.cloudinaryResult.secure_url,  // Cloudinary URL (v2)
             type: type,
             name: req.file.originalname,
-            public_id: req.file.filename
+            public_id: req.cloudinaryResult.public_id
         });
     } catch (error) {
         console.error('Upload error:', error);
