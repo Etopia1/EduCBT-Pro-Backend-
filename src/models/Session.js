@@ -17,6 +17,7 @@ const sessionSchema = new mongoose.Schema({
     violations: [violationSchema],
     isLocked: { type: Boolean, default: false },
     lockReason: { type: String },
+    manualGrades: { type: mongoose.Schema.Types.Mixed, default: {} }, // { questionIndex: marks }
     status: { type: String, enum: ['ongoing', 'completed', 'terminated'], default: 'ongoing' },
 }, { timestamps: true });
 

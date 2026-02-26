@@ -73,6 +73,18 @@ exports.createExam = async (req, res) => {
             proctoringSettings: finalProctoringSettings
         });
         await exam.save();
+
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'EXAM_CREATED',
+            metadata: { examId: exam._id, title: exam.title, subject: exam.subject },
+            severity: 'medium'
+        });
+
         res.status(201).json(exam);
     } catch (error) {
         res.status(500).json({ message: 'Error creating exam', error: error.message });
@@ -144,6 +156,18 @@ exports.toggleExamStatus = async (req, res) => {
 
         await exam.save();
         console.log(`[TOGGLE_STATUS] Success. New Status: ${exam.status}, Active: ${exam.isActive}`);
+
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: status === 'active' ? 'EXAM_STARTED' : status === 'ended' ? 'EXAM_ENDED' : 'EXAM_UPDATED',
+            metadata: { examId: exam._id, title: exam.title, status: status },
+            severity: 'medium'
+        });
+
         res.json({ message: 'Test status updated', exam });
     } catch (error) {
         console.error(`[TOGGLE_STATUS] Error:`, error);
@@ -152,7 +176,41 @@ exports.toggleExamStatus = async (req, res) => {
 };
 
 
+
 // --- STUDENT/SHARED ACTIONS ---
+
+// GET /exam/results — teacher sees all results for their exams
+exports.getTeacherResults = async (req, res) => {
+    try {
+        // Fetch all exams belonging to this teacher
+        const exams = await Exam.find({ teacherId: req.user._id }).select('_id title subject classLevel totalMarks');
+        const examIds = exams.map(e => e._id);
+
+        // Fetch all completed sessions for those exams
+        const sessions = await Session.find({ exam: { $in: examIds }, status: 'completed' })
+            .populate('user', 'fullName username info.classLevel')
+            .populate('exam', 'title subject totalMarks')
+            .sort({ createdAt: -1 });
+
+        const results = sessions.map(s => ({
+            studentName: s.user?.fullName || s.user?.username || 'Student',
+            studentId:   s.user?._id,
+            examId:      s.exam?._id,
+            examTitle:   s.exam?.title,
+            subject:     s.exam?.subject,
+            score:       s.score,
+            totalMarks:  s.exam?.totalMarks || 100,
+            percentage:  s.percentage,
+            submittedAt: s.endTime || s.updatedAt,
+        }));
+
+        res.json(results);
+    } catch (err) {
+        console.error('[GET_TEACHER_RESULTS]', err);
+        res.status(500).json({ message: 'Failed to fetch results', error: err.message });
+    }
+};
+
 
 exports.getAvailableExams = async (req, res) => {
     try {
@@ -260,6 +318,17 @@ exports.startSession = async (req, res) => {
         });
         await session.save();
 
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: userId,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'EXAM_SESSION_START',
+            metadata: { examId: examId, title: exam.title },
+            severity: 'low'
+        });
+
         console.log(`[START_SESSION] New session created for user ${userId} on exam ${examId}`);
         res.json({
             ...session.toObject(),
@@ -337,6 +406,17 @@ exports.submitExam = async (req, res) => {
         session.endTime = new Date();
 
         await session.save();
+
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'EXAM_SUBMIT',
+            metadata: { examId: exam._id, title: exam.title, score: totalScore, percentage: resultPercentage },
+            severity: 'medium'
+        });
 
         // AUTO-UPDATE STUDENT RECORD WITH TEST SCORE BY SUBJECT
         try {
@@ -543,6 +623,22 @@ exports.logViolation = async (req, res) => {
 
         await session.save();
 
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'EXAM_VIOLATION',
+            metadata: { 
+                sessionId: sessionId, 
+                violationType: type, 
+                examId: session.exam,
+                isLocked: session.isLocked 
+            },
+            severity: type.startsWith('LOCKED') ? 'critical' : 'high'
+        });
+
         console.log(`[PROCTORING VIOLATION] Session: ${sessionId}, Type: ${type}, User: ${req.user.fullName}`);
         res.json({ success: true, session });
     } catch (error) {
@@ -717,7 +813,7 @@ exports.getStudentResults = async (req, res) => {
 // Update Manual Grade for Essays
 exports.updateManualGrade = async (req, res) => {
     try {
-        const { sessionId, questionIndex, manualScore } = req.body;
+        const { sessionId, grades } = req.body; // grades: [{ questionIndex, marksEarned }]
         const session = await Session.findById(sessionId).populate('exam');
         if (!session) return res.status(404).json({ message: 'Session not found' });
 
@@ -726,23 +822,27 @@ exports.updateManualGrade = async (req, res) => {
             return res.status(403).json({ message: 'Unauthorized to grade this session' });
         }
 
-        // Re-calculate total score carefully
-        // Default to initialized values if they don't exist
         if (!session.manualGrades) session.manualGrades = {};
         
-        const oldManualScore = session.manualGrades[questionIndex] || 0;
-        session.manualGrades[questionIndex] = manualScore;
+        let scoreAdjustment = 0;
+
+        grades.forEach(({ questionIndex, marksEarned }) => {
+            const oldManualScore = session.manualGrades[questionIndex] || 0;
+            session.manualGrades[questionIndex] = marksEarned;
+            scoreAdjustment += (marksEarned - oldManualScore);
+        });
+
         session.markModified('manualGrades');
 
-        // Update score
-        session.score = (session.score || 0) - oldManualScore + manualScore;
-        session.percentage = (session.score / session.exam.totalMarks) * 100;
+        // Update total score and percentage
+        session.score = Math.max(0, (session.score || 0) + scoreAdjustment);
+        session.percentage = (session.score / (session.exam.totalMarks || 1)) * 100;
 
         await session.save();
-        res.json({ message: 'Grade updated successfully', score: session.score, percentage: session.percentage });
+        res.json({ message: 'Grades updated successfully', score: session.score, percentage: session.percentage });
     } catch (error) {
         console.error('Manual Grading Error:', error);
-        res.status(500).json({ message: 'Failed to update grade' });
+        res.status(500).json({ message: 'Failed to update grades' });
     }
 };
 

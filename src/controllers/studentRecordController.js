@@ -94,6 +94,17 @@ exports.updateStudentRecord = async (req, res) => {
             return res.status(404).json({ message: 'Record not found' });
         }
 
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'RECORD_UPDATED',
+            metadata: { recordId: record._id, studentName: record.fullName, updates },
+            severity: 'medium'
+        });
+
         res.json({ message: 'Record updated successfully', record });
     } catch (error) {
         console.error('Error updating student record:', error);
@@ -128,6 +139,17 @@ exports.bulkUpdateRecords = async (req, res) => {
 
             results.push(record);
         }
+
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'BULK_RECORD_UPDATE',
+            metadata: { count: updates.length },
+            severity: 'medium'
+        });
 
         res.json({ message: 'Records updated successfully', records: results });
     } catch (error) {
@@ -270,6 +292,17 @@ exports.publishSubject = async (req, res) => {
             { $set: updateField }
         );
 
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: publish ? 'SUBJECT_PUBLISHED' : 'SUBJECT_UNPUBLISHED',
+            metadata: { classLevel, subject },
+            severity: 'medium'
+        });
+
         res.json({
             message: `${subject} scores ${publish ? 'published' : 'unpublished'} for ${classLevel}`,
             modifiedCount: result.modifiedCount
@@ -317,6 +350,17 @@ exports.updateExamScore = async (req, res) => {
         record.examScores[normalizedSubject] = score;
         record.lastUpdatedBy = teacher._id;
         await record.save();
+
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: req.user.schoolId,
+            userId: req.user._id,
+            userName: req.user.fullName,
+            userRole: req.user.role,
+            action: 'EXAM_SCORE_UPDATED',
+            metadata: { recordId, subject, score, studentName: record.fullName },
+            severity: 'medium'
+        });
 
         res.json({
             message: `${subject} exam score updated successfully`,

@@ -16,6 +16,7 @@ const io = new Server(server, {
     }
 });
 app.set('io', io); // Allow access to io in controllers
+global.io = io; // Set global access for activity logging helper
 
 // Middleware
 app.use(cors({
@@ -125,16 +126,154 @@ io.on('connection', (socket) => {
         });
     });
 
-    // --- School Community Chat ---
+    // --- School Community Chat (legacy) ---
     socket.on('join_school_community', (schoolId) => {
         socket.join(`school_community_${schoolId}`);
-        // console.log(`Joined community: ${schoolId}`);
+    });
+
+    // --- New Chat System ---
+    // Join a specific chat room (group or DM)
+    socket.on('join_chat_group', (groupId) => {
+        socket.join(`chat_${groupId}`);
+    });
+
+    // Leave a specific chat room
+    socket.on('leave_chat_group', (groupId) => {
+        socket.leave(`chat_${groupId}`);
+    });
+
+    // Join school staff room for group activity notifications
+    socket.on('join_school_staff', (schoolId) => {
+        socket.join(`school_staff_${schoolId}`);
+    });
+
+    // Join personal notification room (every user joins their own room)
+    socket.on('join_personal', (userId) => {
+        socket.userId = userId; // store for later
+        socket.join(`user_${userId}`);
+    });
+
+    // ─── CALL SIGNALING ───────────────────────────────────────────
+    // Notify a specific user of an incoming call
+    socket.on('call_user', (data) => {
+        // data: { targetUserId, callerId, callerName, callerAvatar, callType, roomId }
+        io.to(`user_${data.targetUserId}`).emit('incoming_call', {
+            callerId: data.callerId,
+            callerName: data.callerName,
+            callerAvatar: data.callerAvatar,
+            callType: data.callType,  // 'voice' | 'video'
+            roomId: data.roomId
+        });
+    });
+
+    // Notify multiple users at once (group call invite)
+    socket.on('call_group', (data) => {
+        // data: { targetUserIds[], callerId, callerName, callType, roomId, groupName }
+        (data.targetUserIds || []).forEach(uid => {
+            io.to(`user_${uid}`).emit('incoming_call', {
+                callerId: data.callerId,
+                callerName: data.callerName,
+                callType: data.callType,
+                roomId: data.roomId,
+                groupName: data.groupName,
+                isGroup: true
+            });
+        });
+    });
+
+    // Call accepted - notify caller
+    socket.on('call_accepted', (data) => {
+        // data: { callerId, roomId, answererName, answererId }
+        io.to(`user_${data.callerId}`).emit('call_accepted', {
+            roomId: data.roomId,
+            answererName: data.answererName,
+            answererId: data.answererId
+        });
+    });
+
+    // Call rejected
+    socket.on('call_rejected', (data) => {
+        io.to(`user_${data.callerId}`).emit('call_rejected', {
+            roomId: data.roomId,
+            rejectorName: data.rejectorName
+        });
+    });
+
+    // Call ended - broadcast to everyone in the room
+    socket.on('call_ended', (data) => {
+        if (data.roomId) {
+            io.to(`call_${data.roomId}`).emit('call_ended', { endedBy: socket.id });
+        }
+    });
+
+    // ─── WEBRTC MESH ROOM ─────────────────────────────────────────
+    // Join a call room for WebRTC mesh: returns list of already-connected peers
+    socket.on('join_call_room', ({ roomId, userId, userName, callType }) => {
+        const roomName = `call_${roomId}`;
+        // Get all existing sockets in the room
+        const existingPeers = [...(io.sockets.adapter.rooms.get(roomName) || [])].filter(id => id !== socket.id);
+
+        socket.join(roomName);
+        socket.callRoom = roomId;
+
+        // Tell the joiner who is already in the room
+        socket.emit('call_room_peers', { peers: existingPeers, callType });
+
+        // Tell all existing peers about the new joiner
+        socket.to(roomName).emit('peer_joined_call', {
+            peerId: socket.id,
+            userId,
+            userName
+        });
+    });
+
+    // Leave a call room
+    socket.on('leave_call_room', ({ roomId }) => {
+        const roomName = `call_${roomId}`;
+        socket.to(roomName).emit('peer_left_call', { peerId: socket.id });
+        socket.leave(roomName);
+    });
+
+    // ─── WebRTC RELAY ─────────────────────────────────────────────
+    // Relay an SDP offer to a specific peer
+    socket.on('rtc_offer', ({ targetSocketId, offer, roomId }) => {
+        io.to(targetSocketId).emit('rtc_offer', {
+            offer,
+            fromSocketId: socket.id,
+            roomId
+        });
+    });
+
+    // Relay an SDP answer to a specific peer
+    socket.on('rtc_answer', ({ targetSocketId, answer }) => {
+        io.to(targetSocketId).emit('rtc_answer', {
+            answer,
+            fromSocketId: socket.id
+        });
+    });
+
+    // Relay ICE candidates
+    socket.on('rtc_ice_candidate', ({ targetSocketId, candidate }) => {
+        io.to(targetSocketId).emit('rtc_ice_candidate', {
+            candidate,
+            fromSocketId: socket.id
+        });
+    });
+
+    // ─── ADMIN MONITOR ────────────────────────────────────────────
+    socket.on('join_admin_monitor', (schoolId) => {
+        socket.join(`admin_monitor_${schoolId}`);
     });
 
     socket.on('disconnect', () => {
+        // Notify all call rooms this socket was in
+        if (socket.callRoom) {
+            socket.to(`call_${socket.callRoom}`).emit('peer_left_call', { peerId: socket.id });
+        }
         console.log('User Disconnected', socket.id);
     });
 });
+
 
 // Routes
 app.use('/auth', require('./routes/authRoutes'));
@@ -144,6 +283,8 @@ app.use('/school', require('./routes/schoolRoutes'));
 app.use('/student-records', require('./routes/studentRecordRoutes'));
 app.use('/subscription', require('./routes/subscriptionRoutes'));
 app.use('/community', require('./routes/communityRoutes'));
+app.use('/chat', require('./routes/chatRoutes'));
+app.use('/admin', require('./routes/adminRoutes'));
 app.use('/result-template', require('./routes/resultTemplateRoutes'));
 
 // Debug Route - Users

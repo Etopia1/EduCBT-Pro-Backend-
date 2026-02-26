@@ -17,6 +17,7 @@ router.get('/teacher/all', [authMiddleware, authorize('teacher')], controller.ge
 router.get('/grading/list', [authMiddleware, authorize('teacher')], controller.getExamsForGrading);
 router.post('/grading/submit', [authMiddleware, authorize('teacher')], controller.updateManualGrade);
 router.get('/template/bulk-upload', [authMiddleware, authorize('teacher')], controller.getBulkUploadTemplateCsv);
+router.get('/results', [authMiddleware, authorize('teacher')], controller.getTeacherResults); // Analytics data
 
 // --- STUDENT ROUTES ---
 // Students can fetch available exams and take them

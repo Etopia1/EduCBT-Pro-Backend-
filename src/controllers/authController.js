@@ -140,6 +140,18 @@ exports.login = async (req, res) => {
             userResponse.inviteToken = inviteToken;
         }
 
+        // Activity Logging
+        const { logActivity } = require('./adminController');
+        await logActivity({
+            schoolId: user.schoolId,
+            userId: user._id,
+            userName: user.fullName,
+            userRole: user.role,
+            action: 'USER_LOGIN',
+            metadata: { loginId: user.uniqueLoginId },
+            severity: 'low'
+        });
+
         res.json({ token, user: userResponse });
     } catch (error) {
         console.error('Login error:', error);
