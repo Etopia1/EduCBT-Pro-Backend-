@@ -19,6 +19,7 @@ const userSchema = new mongoose.Schema({
         subjects: [String],
         phone: String,
         location: String,
+        group: String, // For assigning specific exams to groups
         dateOfBirth: Date // Added DOB for age calculation
     }
 }, { timestamps: true });

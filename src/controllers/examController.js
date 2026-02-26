@@ -9,7 +9,11 @@ const Subscription = require('../models/Subscription');
 
 // Create Exam
 exports.createExam = async (req, res) => {
-    const { title, durationMinutes, questions, subject, accessCode, totalMarks, examType, proctoringSettings } = req.body;
+    const { 
+        title, durationMinutes, questions, subject, accessCode, 
+        totalMarks, examType, proctoringSettings, startTime, endTime,
+        negativeMarking, passingPercentage, passingScore 
+    } = req.body;
 
     try {
         // Use subscription attached by middleware or fetch it
@@ -51,11 +55,16 @@ exports.createExam = async (req, res) => {
         const exam = new Exam({
             title,
             durationMinutes,
+            startTime,
+            endTime,
             questions,
             subject,
-            totalMarks: totalMarks || 100,
+            totalMarks: totalMarks || 0,
+            passingScore: passingScore || 0,
+            passingPercentage: passingPercentage || 50,
+            negativeMarking: negativeMarking || 0,
             accessCode,
-            classLevel: req.body.classLevel, // Save classLevel if provided
+            classLevel: req.body.classLevel,
             teacherId: req.user._id,
             schoolId: req.user.schoolId,
             status: 'scheduled',
@@ -146,36 +155,57 @@ exports.toggleExamStatus = async (req, res) => {
 // --- STUDENT/SHARED ACTIONS ---
 
 exports.getAvailableExams = async (req, res) => {
-    // For students: get active exams in their school that they haven't completed yet
     try {
         const userId = req.user._id;
+        const student = await User.findById(userId);
+        if (!student) return res.status(404).json({ message: 'User not found' });
+        
+        const schoolId = student.schoolId;
+        const studentClass = student.info?.classLevel;
+        const studentGroup = student.info?.group;
 
-        // Find all active exams in the student's school
-        const activeExams = await Exam.find({
-            schoolId: req.user.schoolId,
-            isActive: true,
-            status: 'active'
-        }).select('-questions.correctOption -questions.correctOptions'); // Hide answers
+        // Fetch ALL exams in this school — both active AND scheduled so students can see upcoming ones
+        const exams = await Exam.find({
+            schoolId,
+            status: { $in: ['active', 'scheduled'] }
+        }).select('title subject durationMinutes teacherId examType proctoringSettings totalMarks questions groups startTime endTime classLevel status isActive');
 
-        // Find all completed/terminated sessions for this student
-        const completedSessions = await Session.find({
-            user: userId,
-            status: { $in: ['completed', 'terminated'] }
-        }).select('exam');
+        const now = new Date();
+        const availableExams = [];
 
-        // Extract exam IDs that student has already completed
-        const completedExamIds = completedSessions.map(session => session.exam.toString());
+        const sessions = await Session.find({ user: userId });
+        const takenExamIds = sessions.map(s => s.exam.toString());
 
-        // Filter out exams that the student has already completed
-        const availableExams = activeExams.filter(exam =>
-            !completedExamIds.includes(exam._id.toString())
-        );
+        for (const exam of exams) {
+            // Already completed? Skip
+            if (takenExamIds.includes(exam._id.toString())) continue;
 
-        console.log(`[AVAILABLE_EXAMS] User ${userId}: ${availableExams.length} available, ${completedExamIds.length} already taken`);
+            // Class level filter: only restrict if teacher explicitly set a class
+            if (exam.classLevel && exam.classLevel.trim() !== '' && studentClass) {
+                const normalize = s => s.replace(/\s+/g, '').toLowerCase();
+                if (normalize(exam.classLevel) !== normalize(studentClass)) continue;
+            }
+
+            // Group filter
+            if (exam.groups && exam.groups.length > 0) {
+                if (!studentGroup || !exam.groups.includes(studentGroup)) continue;
+            }
+
+            // End time passed? Skip
+            if (exam.endTime && exam.endTime < now) continue;
+
+            availableExams.push({
+                ...exam.toObject(),
+                questionCount: exam.questions.length,
+                questions: undefined,
+                canStart: exam.status === 'active' && exam.isActive // student can only START if active
+            });
+        }
+
         res.json(availableExams);
     } catch (error) {
-        console.error('[AVAILABLE_EXAMS] Error:', error);
-        res.status(500).json({ message: 'Error fetching exams', error: error.message });
+        console.error('Get Available Exams Error:', error);
+        res.status(500).json({ message: 'Error fetching available tests' });
     }
 };
 
@@ -250,39 +280,59 @@ exports.submitExam = async (req, res) => {
         if (!session) return res.status(404).json({ message: 'Session not found' });
 
         const exam = session.exam;
+        let totalScore = 0;
         let correctCount = 0;
+        let wrongCount = 0;
+        let totalPossibleMarks = 0;
 
         // Calculate Score
         exam.questions.forEach((question, index) => {
-            const studentAnswer = answers[index]; // Can be Number or Array of Numbers
+            const studentAnswer = answers[index];
+            const qMarks = question.marks || 1;
+            totalPossibleMarks += qMarks;
 
-            // Backwards compatibility for correctOptions
-            let correctOnes = question.correctOptions || [];
-            if (correctOnes.length === 0 && question.correctOption !== undefined) {
-                correctOnes = [question.correctOption];
+            let isCorrect = false;
+
+            if (question.type === 'mcq' || question.type === 'true_false' || !question.type) {
+                // MCQ / T-F logic
+                let correctOnes = question.correctOptions || [];
+                if (correctOnes.length === 0 && (question.correctOption !== undefined && question.correctOption !== null)) {
+                    correctOnes = [question.correctOption];
+                }
+
+                if (Array.isArray(studentAnswer)) {
+                    isCorrect = studentAnswer.length === correctOnes.length &&
+                        studentAnswer.every(val => correctOnes.includes(val));
+                } else {
+                    isCorrect = correctOnes.includes(studentAnswer);
+                }
+            } else if (question.type === 'fib') {
+                // Fill in the blank (string match)
+                isCorrect = studentAnswer?.toString().trim().toLowerCase() === question.correctAnswer?.trim().toLowerCase();
+            } else if (question.type === 'essay') {
+                // Essay logic - for now auto-mark as correct if not empty (Placeholder)
+                isCorrect = !!studentAnswer?.toString().trim();
             }
 
-            if (Array.isArray(studentAnswer)) {
-                // Multi-select: Check if arrays have same elements
-                if (studentAnswer.length === correctOnes.length &&
-                    studentAnswer.every(val => correctOnes.includes(val))) {
-                    correctCount++;
-                }
-            } else {
-                // Single select
-                if (correctOnes.includes(studentAnswer)) {
-                    correctCount++;
-                }
+            if (isCorrect) {
+                totalScore += qMarks;
+                correctCount++;
+            } else if (studentAnswer !== undefined && studentAnswer !== null && studentAnswer !== '') {
+                // Wrong answer - apply negative marking
+                totalScore -= (exam.negativeMarking || 0);
+                wrongCount++;
             }
         });
 
-        const totalQuestions = exam.questions.length;
-        const totalMarks = exam.totalMarks || 100;
-        const scaledScore = (correctCount / totalQuestions) * totalMarks;
+        // Prevent negative results
+        totalScore = Math.max(0, totalScore);
+        
+        // Target calculation
+        const resultPercentage = totalPossibleMarks > 0 ? (totalScore / totalPossibleMarks) * 100 : 0;
 
         session.answers = answers;
-        session.score = scaledScore; // Scaled value (e.g., 15/20)
-        session.percentage = (correctCount / totalQuestions) * 100;
+        session.score = totalScore; 
+        session.percentage = resultPercentage;
         session.status = 'completed';
         session.endTime = new Date();
 
@@ -296,7 +346,7 @@ exports.submitExam = async (req, res) => {
             // Get student info
             const student = await User.findById(req.user._id);
 
-            // Normalize subject name (e.g., "Mathematics" -> "mathematics")
+            // Normalize subject name
             const subjectKey = exam.subject.toLowerCase().replace(/\s+/g, '');
 
             // Find or create student record
@@ -313,31 +363,26 @@ exports.submitExam = async (req, res) => {
                 });
             }
 
-            // Update test score for this subject (percentage out of 100)
+            // Update test score for this subject
             if (record.testScores && record.testScores.hasOwnProperty(subjectKey)) {
                 record.testScores[subjectKey] = session.percentage;
                 await record.save();
-                console.log(`[AUTO-UPDATE] Updated ${exam.subject} test score for ${student.fullName}: ${session.percentage}%`);
-            } else {
-                console.log(`[AUTO-UPDATE] Subject key "${subjectKey}" not found in testScores schema`);
+                console.log(`[AUTO-UPDATE] Updated ${exam.subject} score for ${student.fullName}: ${session.percentage}%`);
             }
         } catch (recordError) {
             console.error('[AUTO-UPDATE] Error updating student record:', recordError);
-            // Don't fail the exam submission if record update fails
         }
 
         res.json({
             message: 'Test submitted and marked successfully',
-            score: scaledScore.toFixed(1),
-            total: totalMarks,
+            score: totalScore.toFixed(1),
+            total: totalPossibleMarks,
             correctCount,
-            totalQuestions,
+            wrongCount,
             percentage: session.percentage.toFixed(2)
         });
     } catch (error) {
-        console.error('=== SUBMIT EXAM ERROR ===');
-        console.error('Error:', error.message);
-        console.error('Stack:', error.stack);
+        console.error('=== SUBMIT EXAM ERROR ===', error);
         res.status(500).json({ message: 'Error submitting test', error: error.message });
     }
 };
@@ -357,7 +402,11 @@ exports.getExamById = async (req, res) => {
 exports.updateExam = async (req, res) => {
     try {
         const { id } = req.params;
-        const { title, subject, durationMinutes, totalMarks, questions, examType, proctoringSettings, classLevel } = req.body;
+        const { 
+            title, subject, durationMinutes, totalMarks, questions, 
+            examType, proctoringSettings, classLevel, startTime, endTime,
+            negativeMarking, passingPercentage, passingScore 
+        } = req.body;
 
         const exam = await Exam.findById(id);
         if (!exam) return res.status(404).json({ message: 'Exam not found' });
@@ -367,32 +416,20 @@ exports.updateExam = async (req, res) => {
             return res.status(403).json({ message: 'Unauthorized to edit this test' });
         }
 
-        // Check subscription if trying to enable proctoring
-        if (examType === 'proctored') {
-            const School = require('../models/School');
-            const school = await School.findById(req.user.schoolId);
-            const isAdminSchool = school && school.schoolLoginId === 'SCH-20670E';
-            
-            const Subscription = require('../models/Subscription');
-            const subscription = await Subscription.findOne({ schoolId: req.user.schoolId });
-            
-            const hasProctoring = isAdminSchool || (subscription && subscription.isActive() && subscription.features?.proctoriedExams);
-
-            if (!hasProctoring) {
-                return res.status(403).json({ 
-                    message: 'Your current subscription plan does not support Monitor Mode. Please upgrade.' 
-                });
-            }
-        }
-
         // Apply updates
         exam.title = title || exam.title;
         exam.subject = subject || exam.subject;
         exam.durationMinutes = durationMinutes || exam.durationMinutes;
+        exam.startTime = startTime || exam.startTime;
+        exam.endTime = endTime || exam.endTime;
         exam.totalMarks = totalMarks || exam.totalMarks;
         exam.questions = questions || exam.questions;
         exam.classLevel = classLevel || exam.classLevel;
         exam.examType = examType || exam.examType;
+        exam.negativeMarking = negativeMarking !== undefined ? negativeMarking : exam.negativeMarking;
+        exam.passingPercentage = passingPercentage || exam.passingPercentage;
+        exam.passingScore = passingScore || exam.passingScore;
+
         if (proctoringSettings) {
             exam.proctoringSettings = { ...exam.proctoringSettings, ...proctoringSettings };
         }
@@ -405,60 +442,52 @@ exports.updateExam = async (req, res) => {
     }
 };
 
-// Get Exams for Students (Based on their classLevel and school)
-// Students see exams where exam.classLevel matches their class, regardless of teacher
+// Get Exams for Students — shows ALL exams (active + scheduled) in their school
 exports.getStudentExams = async (req, res) => {
     try {
         const student = req.user;
-        if (!student.info?.classLevel) {
-            return res.status(400).json({ message: 'No class level assigned. Please contact your teacher.' });
-        }
+        const studentClass = student.info?.classLevel;
 
-        // Find exams that match:
-        // 1. Same school as student
-        // 2. Same class level as student
-        // 3. Active exams only
+        console.log(`[GET_STUDENT_EXAMS] Student: ${student.username}, Class: ${studentClass}, School: ${student.schoolId}`);
 
-        console.log(`[GET_STUDENT_EXAMS] Student: ${student.username}, Class: ${student.info.classLevel}, School: ${student.schoolId}`);
-
-        // Normalize class level (e.g., "SS 2" -> "SS2") to ensure matching
-        const studentClass = student.info.classLevel;
-        const normalizedClass = studentClass.replace(/\s+/g, ''); // Remove spaces
-        const spacedClass = normalizedClass.replace(/([a-zA-Z]+)(\d+)/, '$1 $2'); // Add space (e.g. SS 2)
-
-        const query = {
+        // Fetch active AND scheduled exams so students can see upcoming exams too
+        const exams = await Exam.find({
             schoolId: student.schoolId,
-            classLevel: { $in: [studentClass, normalizedClass, spacedClass] }, // Check all variations
-            isActive: true
-        };
-        console.log('[GET_STUDENT_EXAMS] Query:', query);
-
-        const exams = await Exam.find(query)
-            .populate('teacherId', 'fullName info.subject') // Include teacher info for display
+            status: { $in: ['active', 'scheduled'] }
+        })
+            .populate('teacherId', 'fullName info.subject')
             .sort({ createdAt: -1 });
 
-        // Get student's completed sessions
-        const completedSessions = await Session.find({
-            user: student._id,
-            status: { $in: ['completed', 'terminated'] }
+        // Get student's sessions
+        const sessions = await Session.find({
+            user: student._id
         }).select('exam status');
 
-        // Create a map of completed exam IDs
-        const completedExamMap = {};
-        completedSessions.forEach(session => {
-            completedExamMap[session.exam.toString()] = session.status;
+        const sessionMap = {};
+        sessions.forEach(s => { sessionMap[s.exam.toString()] = s.status; });
+
+        const normalize = s => (s || '').replace(/\s+/g, '').toLowerCase();
+
+        // Filter by class — only if teacher set a class. Blank class = open to all
+        const filteredExams = exams.filter(exam => {
+            const cl = exam.classLevel?.trim();
+            if (!cl) return true;
+            if (!studentClass) return true;
+            return normalize(cl) === normalize(studentClass);
         });
 
-        // Add completion status to each exam
-        const examsWithStatus = exams.map(exam => {
+        const examsWithStatus = filteredExams.map(exam => {
             const examObj = exam.toObject();
             const examId = exam._id.toString();
-            examObj.isCompleted = !!completedExamMap[examId];
-            examObj.completionStatus = completedExamMap[examId] || null;
+            const sessionStatus = sessionMap[examId];
+            examObj.isCompleted = sessionStatus === 'completed';
+            examObj.isTerminated = sessionStatus === 'terminated';
+            examObj.completionStatus = sessionStatus || null;
+            examObj.canStart = exam.status === 'active' && exam.isActive && !sessionStatus;
             return examObj;
         });
 
-        console.log(`[GET_STUDENT_EXAMS] Found ${exams.length} exams, ${completedSessions.length} completed`);
+        console.log(`[GET_STUDENT_EXAMS] Returning ${examsWithStatus.length} exams (${sessions.length} sessions found)`);
         res.json(examsWithStatus);
     } catch (error) {
         console.error('[GET_STUDENT_EXAMS] Error:', error);
@@ -524,6 +553,134 @@ exports.logViolation = async (req, res) => {
 
 
 
+// --- BULK UPLOAD & EXPORT ---
+const csv = require('csv-parser');
+const xlsx = require('xlsx');
+const { Readable } = require('stream');
+const { Parser } = require('json2csv');
+const PDFDocument = require('pdfkit');
+
+exports.bulkUploadQuestions = async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ message: 'File is required' });
+
+        let questions = [];
+        const fileExtension = req.file.originalname.split('.').pop().toLowerCase();
+
+        if (fileExtension === 'csv') {
+            const results = [];
+            const stream = Readable.from(req.file.buffer);
+            await new Promise((resolve, reject) => {
+                stream.pipe(csv())
+                    .on('data', (data) => results.push(data))
+                    .on('end', () => {
+                        questions = results.map(row => ({
+                            text: row.text || row.Question || row.question,
+                            type: (row.type || row.Type || 'mcq').toLowerCase(),
+                            options: [row.option1, row.option2, row.option3, row.option4, row.option5].filter(Boolean),
+                            correctOptions: row.correctIndex !== undefined ? [parseInt(row.correctIndex)] : [],
+                            correctAnswer: row.correctAnswer || row.Answer || row.answer,
+                            marks: parseInt(row.marks) || 1
+                        }));
+                        resolve();
+                    })
+                    .on('error', reject);
+            });
+        } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
+            const workbook = xlsx.read(req.file.buffer, { type: 'buffer' });
+            const sheetName = workbook.SheetNames[0];
+            const data = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
+            questions = data.map(row => ({
+                text: row.text || row.Question || row.question,
+                type: (row.type || row.Type || 'mcq').toLowerCase(),
+                options: [row.option1, row.option2, row.option3, row.option4, row.option5].filter(Boolean),
+                correctOptions: row.correctIndex !== undefined ? [parseInt(row.correctIndex)] : [],
+                correctAnswer: row.correctAnswer || row.Answer || row.answer,
+                marks: parseInt(row.marks) || 1
+            }));
+        } else {
+            return res.status(400).json({ message: 'Invalid file format. Use CSV or Excel.' });
+        }
+
+        res.json({ message: 'File processed successfully', questions });
+    } catch (error) {
+        console.error('Bulk Upload Error:', error);
+        res.status(500).json({ message: 'Error processing bulk upload', error: error.message });
+    }
+};
+
+exports.exportExamResults = async (req, res) => {
+    const { examId } = req.params;
+    const { format } = req.query; // 'csv' or 'pdf'
+    try {
+        const sessions = await Session.find({ exam: examId, status: 'completed' }).populate('user');
+        const exam = await Exam.findById(examId);
+        
+        if (!exam) return res.status(404).json({ message: 'Exam not found' });
+
+        if (format === 'csv') {
+            const fields = [
+                { label: 'Student Name', value: 'user.fullName' },
+                { label: 'Login ID', value: 'user.uniqueLoginId' },
+                { label: 'Score', value: 'score' },
+                { label: 'Percentage', value: 'percentage' },
+                { label: 'Date Submitted', value: 'endTime' }
+            ];
+            const json2csvParser = new Parser({ fields });
+            const csvData = json2csvParser.parse(sessions);
+            
+            res.header('Content-Type', 'text/csv');
+            res.attachment(`${exam.title}_results.csv`);
+            return res.send(csvData);
+        } else if (format === 'pdf') {
+            const doc = new PDFDocument();
+            res.header('Content-Type', 'application/pdf');
+            res.attachment(`${exam.title}_results.pdf`);
+            doc.pipe(res);
+
+            // Header
+            doc.fontSize(20).fillColor('#D4AF37').text('KICC CBT - Exam Results', { align: 'center' });
+            doc.fontSize(14).fillColor('black').text(`Exam: ${exam.title}`, { align: 'center' });
+            doc.fontSize(12).text(`Subject: ${exam.subject} | Date: ${new Date().toLocaleDateString()}`, { align: 'center' });
+            doc.moveDown();
+            doc.strokeColor('#D4AF37').moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+            doc.moveDown();
+
+            // Table Header
+            doc.fontSize(12).text('S/N | Student Name | ID | Score | %', { bold: true });
+            doc.moveDown(0.5);
+
+            sessions.forEach((s, i) => {
+                doc.fontSize(10).text(`${i + 1}. ${s.user.fullName} | ${s.user.uniqueLoginId} | ${s.score.toFixed(1)} | ${s.percentage.toFixed(2)}%`);
+                if (doc.y > 700) doc.addPage();
+            });
+
+            doc.end();
+        } else {
+            res.status(400).json({ message: 'Invalid format requested. Use csv or pdf.' });
+        }
+    } catch (error) {
+        console.error('Export Error:', error);
+        res.status(500).json({ message: 'Failed to export results' });
+    }
+};
+
+
+
+// --- AI FEATURES ---
+const aiService = require('../utils/aiService');
+
+exports.generateAIQuestions = async (req, res) => {
+    try {
+        const { subject, topic, classLevel, count, type } = req.body;
+        const questions = await aiService.generateQuestions({ subject, topic, classLevel, count, type });
+        res.json({ questions });
+    } catch (error) {
+        console.error('AI Generation Error:', error);
+        res.status(500).json({ message: 'Failed to generate questions using AI' });
+    }
+};
+
 // Get Student Results (History)
 exports.getStudentResults = async (req, res) => {
     try {
@@ -536,19 +693,97 @@ exports.getStudentResults = async (req, res) => {
             })
             .sort({ endTime: -1 });
 
-        const formattedResults = results.map(session => ({
-            _id: session._id,
-            examTitle: session.exam?.title || 'Unknown Exam',
-            subject: session.exam?.subject || 'General',
-            score: session.score,
-            totalMarks: session.exam?.totalMarks || 100,
-            submittedAt: session.endTime,
-            grade: (session.score / (session.exam?.totalMarks || 100)) * 100 >= 50 ? 'Pass' : 'Fail'
-        }));
+        const formattedResults = results.map(session => {
+            const totalMarks = session.exam?.totalMarks || 0;
+            return {
+                _id: session._id,
+                examTitle: session.exam?.title || 'Unknown Exam',
+                subject: session.exam?.subject || 'General',
+                score: session.score,
+                totalMarks,
+                percentage: session.percentage,
+                submittedAt: session.endTime,
+                grade: session.percentage >= 50 ? 'Pass' : 'Fail'
+            };
+        });
 
         res.json(formattedResults);
     } catch (error) {
         console.error("Error fetching results:", error);
         res.status(500).json({ message: 'Error fetching results' });
+    }
+};
+
+// Update Manual Grade for Essays
+exports.updateManualGrade = async (req, res) => {
+    try {
+        const { sessionId, questionIndex, manualScore } = req.body;
+        const session = await Session.findById(sessionId).populate('exam');
+        if (!session) return res.status(404).json({ message: 'Session not found' });
+
+        // Security: Only owner of exam can grade
+        if (session.exam.teacherId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: 'Unauthorized to grade this session' });
+        }
+
+        // Re-calculate total score carefully
+        // Default to initialized values if they don't exist
+        if (!session.manualGrades) session.manualGrades = {};
+        
+        const oldManualScore = session.manualGrades[questionIndex] || 0;
+        session.manualGrades[questionIndex] = manualScore;
+        session.markModified('manualGrades');
+
+        // Update score
+        session.score = (session.score || 0) - oldManualScore + manualScore;
+        session.percentage = (session.score / session.exam.totalMarks) * 100;
+
+        await session.save();
+        res.json({ message: 'Grade updated successfully', score: session.score, percentage: session.percentage });
+    } catch (error) {
+        console.error('Manual Grading Error:', error);
+        res.status(500).json({ message: 'Failed to update grade' });
+    }
+};
+
+// Download Bulk Upload Template
+exports.getBulkUploadTemplateCsv = async (req, res) => {
+    try {
+        const fields = ['text', 'type', 'option1', 'option2', 'option3', 'option4', 'correctIndex', 'marks'];
+        const sampleData = [
+            { text: 'Sample MCQ Question?', type: 'mcq', option1: 'Choice A', option2: 'Choice B', option3: 'Choice C', option4: 'Choice D', correctIndex: 0, marks: 2 },
+            { text: 'Sample FIB Question: The capital of Nigeria is __________.', type: 'fib', option1: '', option2: '', option3: '', option4: '', correctIndex: '', marks: 2 },
+            { text: 'Sample Essay: Discuss the impact of technology in education.', type: 'essay', option1: '', option2: '', option3: '', option4: '', correctIndex: '', marks: 5 }
+        ];
+
+        const { Parser } = require('json2csv');
+        const json2csvParser = new Parser({ fields });
+        const csv = json2csvParser.parse(sampleData);
+
+        res.header('Content-Type', 'text/csv');
+        res.attachment('bulk_question_template.csv');
+        res.send(csv);
+    } catch (error) {
+        console.error('Template Error:', error);
+        res.status(500).json({ message: 'Failed to generate template' });
+    }
+};
+
+// Get sessions that have essay questions for grading
+exports.getExamsForGrading = async (req, res) => {
+    try {
+        // Find exams created by this teacher that have essay questions
+        const exams = await Exam.find({ teacherId: req.user._id, 'questions.type': 'essay' });
+        const examIds = exams.map(e => e._id);
+
+        // Find completed sessions for these exams
+        const sessions = await Session.find({ 
+            exam: { $in: examIds }, 
+            status: 'completed' 
+        }).populate('user').populate('exam');
+
+        res.json(sessions);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching grading tasks' });
     }
 };

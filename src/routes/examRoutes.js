@@ -10,8 +10,13 @@ const { parser, cloudinaryUpload } = require('../utils/cloudinaryConfig');
 // --- TEACHER ROUTES (STRICT CONTROL) ---
 // Only 'teacher' role can create or manage exams
 router.post('/create', [authMiddleware, authorize('teacher'), validateExamType, checkFeatureLimits('exams')], controller.createExam);
+router.post('/ai-generate', [authMiddleware, authorize('teacher')], controller.generateAIQuestions);
+router.post('/bulk-upload-questions', [authMiddleware, authorize('teacher')], parser.single('file'), controller.bulkUploadQuestions);
 router.post('/teacher/upload-image', [authMiddleware, authorize('teacher')], parser.single('image'), cloudinaryUpload, controller.uploadQuestionImage);
 router.get('/teacher/all', [authMiddleware, authorize('teacher')], controller.getTeacherExams);
+router.get('/grading/list', [authMiddleware, authorize('teacher')], controller.getExamsForGrading);
+router.post('/grading/submit', [authMiddleware, authorize('teacher')], controller.updateManualGrade);
+router.get('/template/bulk-upload', [authMiddleware, authorize('teacher')], controller.getBulkUploadTemplateCsv);
 
 // --- STUDENT ROUTES ---
 // Students can fetch available exams and take them
@@ -25,6 +30,7 @@ router.post('/violation/log', [authMiddleware, authorize('student')], controller
 // --- SESSION MONITORING ROUTES (TEACHER) ---
 const sessionController = require('../controllers/sessionController');
 router.get('/:examId/sessions', [authMiddleware, authorize('teacher')], sessionController.getExamSessions);
+router.get('/:examId/export-results', [authMiddleware, authorize('teacher')], controller.exportExamResults);
 router.post('/session/:sessionId/unlock', [authMiddleware, authorize('teacher')], sessionController.unlockSession);
 router.post('/session/:sessionId/lock', [authMiddleware, authorize('teacher')], sessionController.lockSession);
 router.post('/session/:sessionId/force-submit', [authMiddleware, authorize('teacher')], sessionController.forceSubmitSession);

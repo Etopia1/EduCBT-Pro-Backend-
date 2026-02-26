@@ -147,14 +147,63 @@ exports.login = async (req, res) => {
     }
 };
 
-exports.register = async (req, res) => {
-    // Mostly for seeding/admin use
-    const { username, password, fullName, role } = req.body;
+exports.sendOTP = async (req, res) => {
+    const { email } = req.body;
     try {
-        const user = new User({ username, password, fullName, role });
-        await user.save();
-        res.status(201).json({ message: 'User created' });
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User with this email not found' });
+
+        const { generateOTP } = require('../utils/otp');
+        const otp = generateOTP();
+        
+        // Save OTP in VerificationToken
+        await VerificationToken.deleteOne({ userId: user._id, modelType: 'User' }); // Clean up old ones
+        const otpToken = new VerificationToken({
+            userId: user._id,
+            modelType: 'User',
+            otp,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+        });
+        await otpToken.save();
+
+        const { sendOTPEmail } = require('../utils/emailService');
+        await sendOTPEmail(email, otp);
+
+        res.json({ message: 'OTP sent to your email' });
     } catch (error) {
-        res.status(500).json({ message: 'Error creating user', error: error.message });
+        console.error('OTP Send Error:', error);
+        res.status(500).json({ message: 'Error sending OTP' });
+    }
+};
+
+exports.verifyOTP = async (req, res) => {
+    const { email, otp } = req.body;
+    try {
+        const user = await User.findOne({ email });
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        const otpToken = await VerificationToken.findOne({ 
+            userId: user._id, 
+            modelType: 'User', 
+            otp,
+            used: false
+        });
+
+        if (!otpToken || otpToken.expiresAt < new Date()) {
+            return res.status(400).json({ message: 'Invalid or expired OTP' });
+        }
+
+        otpToken.used = true;
+        await otpToken.save();
+
+        user.verified = true;
+        user.status = 'verified';
+        await user.save();
+
+        const token = generateToken(user._id, user.role);
+        res.json({ message: 'OTP verified successfully', token, user });
+    } catch (error) {
+        console.error('OTP Verify Error:', error);
+        res.status(500).json({ message: 'Error verifying OTP' });
     }
 };

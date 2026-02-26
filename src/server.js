@@ -80,33 +80,46 @@ io.on('connection', (socket) => {
         console.log(`Teacher joined monitoring for exam: ${examId}`);
     });
 
-    // Student sends their screen offer
-    socket.on('screen_offer', (data) => {
-        // data: { examId, sessionId, offer, socketId: socket.id }
-        console.log(`Screen Offer from ${data.sessionId} for exam ${data.examId}`);
-        // Forward to the teacher monitoring this exam
-        socket.to(`monitor_exam_${data.examId}`).emit('student_screen_offer', {
+    // Student announces presence to teacher monitor room
+    socket.on('student_joined_monitor', (data) => {
+        socket.join(`exam_${data.examId}`);
+        socket.to(`monitor_exam_${data.examId}`).emit('student_ready', {
             sessionId: data.sessionId,
-            offer: data.offer,
+            studentName: data.studentName,
             studentSocketId: socket.id
         });
     });
 
-    // Teacher answers the offer
-    socket.on('screen_answer', (data) => {
-        // data: { studentSocketId, answer }
-        console.log(`Screen Answer to student ${data.studentSocketId}`);
-        io.to(data.studentSocketId).emit('teacher_screen_answer', {
-            answer: data.answer,
-            teacherSocketId: socket.id // Send teacher ID so student can send ICE candidates back
+    // Teacher requests student's screen stream
+    socket.on('request_screen', (data) => {
+        io.to(data.studentSocketId).emit('request_screen', { teacherSocketId: socket.id });
+    });
+
+    // Student sends their screen offer → forward to teacher monitoring that exam
+    socket.on('screen_offer', (data) => {
+        // data: { examId, sessionId, offer, socketId }
+        console.log(`[WEBRTC] Screen offer from student ${socket.id} for exam ${data.examId}`);
+        socket.to(`monitor_exam_${data.examId}`).emit('screen_offer', {
+            offer: data.offer,
+            sessionId: data.sessionId,
+            socketId: socket.id   // student's socket ID so teacher can reply
         });
     });
 
-    // ICE Candidates exchange
+    // Teacher sends SDP answer → forward to specific student
+    socket.on('screen_answer', (data) => {
+        // data: { studentSocketId, answer }
+        console.log(`[WEBRTC] Screen answer from teacher to student ${data.studentSocketId}`);
+        io.to(data.studentSocketId).emit('screen_answer', {
+            answer: data.answer,
+            teacherSocketId: socket.id
+        });
+    });
+
+    // ICE candidate exchange (bidirectional Teacher <-> Student)
     socket.on('ice_candidate', (data) => {
         // data: { targetSocketId, candidate }
-        // Forward candidate to the specific target (Teacher <-> Student)
-        io.to(data.targetSocketId).emit('remote_ice_candidate', {
+        io.to(data.targetSocketId).emit('ice_candidate', {
             candidate: data.candidate,
             senderSocketId: socket.id
         });
@@ -133,7 +146,7 @@ app.use('/subscription', require('./routes/subscriptionRoutes'));
 app.use('/community', require('./routes/communityRoutes'));
 app.use('/result-template', require('./routes/resultTemplateRoutes'));
 
-// Debug Route
+// Debug Route - Users
 app.get('/debug/users', async (req, res) => {
     try {
         const users = await require('./models/User').find({});
@@ -147,6 +160,95 @@ app.get('/debug/users', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// Debug Route - All exams with visibility explanation
+// GET /debug/exams              → all exams in DB
+// GET /debug/exams?class=SS2   → all exams, shows if SS2 students can see them
+app.get('/debug/exams', async (req, res) => {
+    try {
+        const Exam = require('./models/Exam');
+        const classLevel = (req.query.class || '').trim();
+        const normalize = s => (s || '').replace(/\s+/g, '').toLowerCase();
+
+        // Fetch ALL exams from DB regardless of status
+        const exams = await Exam.find({})
+            .select('title subject classLevel status isActive durationMinutes questions createdAt startTime endTime schoolId')
+            .sort({ createdAt: -1 });
+
+        const now = new Date();
+
+        const summary = exams.map(e => {
+            const reasons = [];
+            let visible = true;
+
+            // Status check
+            if (!['active', 'scheduled'].includes(e.status)) {
+                visible = false;
+                reasons.push(`status='${e.status}' — must be 'active' or 'scheduled'`);
+            }
+
+            // Class check (only if student class provided)
+            if (classLevel) {
+                const examClass = (e.classLevel || '').trim();
+                if (examClass && normalize(examClass) !== normalize(classLevel)) {
+                    visible = false;
+                    reasons.push(`classLevel='${examClass}' does NOT match student class '${classLevel}'`);
+                }
+            }
+
+            // End time check
+            if (e.endTime && e.endTime < now) {
+                visible = false;
+                reasons.push(`endTime '${e.endTime.toISOString()}' has already passed`);
+            }
+
+            return {
+                id: e._id,
+                title: e.title,
+                subject: e.subject,
+                classLevel: e.classLevel || '(All classes — blank)',
+                status: e.status,
+                isActive: e.isActive,
+                canStudentSee: visible ? '✅ YES' : '❌ NO',
+                hiddenReasons: visible ? [] : reasons,
+                questions: e.questions?.length || 0,
+                startTime: e.startTime || 'Not set',
+                endTime: e.endTime || 'Not set',
+            };
+        });
+
+        // Console log
+        console.log(`\n========= DEBUG EXAMS (student class filter: "${classLevel || 'none'}") =========`);
+        summary.forEach((e, i) => {
+            const vis = e.canStudentSee;
+            console.log(`${i + 1}. ${vis} [${e.status.toUpperCase()}] "${e.title}" | ${e.subject} | Class: "${e.classLevel}"`);
+            if (e.hiddenReasons.length) e.hiddenReasons.forEach(r => console.log(`      ↳ HIDDEN: ${r}`));
+        });
+        console.log(`Total: ${summary.length}\n`);
+
+        res.json({ filterByClass: classLevel || '(none)', total: summary.length, exams: summary });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Quick fix route: force an exam to be active/visible
+// GET /debug/activate-exam/:examId
+app.get('/debug/activate-exam/:examId', async (req, res) => {
+    try {
+        const Exam = require('./models/Exam');
+        const exam = await Exam.findById(req.params.examId);
+        if (!exam) return res.status(404).json({ error: 'Exam not found' });
+        exam.status = 'active';
+        exam.isActive = true;
+        await exam.save();
+        console.log(`[DEBUG] Force-activated exam: ${exam.title}`);
+        res.json({ message: `✅ Exam "${exam.title}" is now ACTIVE and visible to students`, exam: { id: exam._id, title: exam.title, status: exam.status, isActive: exam.isActive } });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 
 // Debug Seed Route
 app.get('/debug/seed', async (req, res) => {
