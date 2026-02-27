@@ -37,7 +37,8 @@ exports.getMyGroups = async (req, res) => {
             schoolId,
             members: userId,
             isArchived: false
-        }).sort({ lastMessageAt: -1 });
+        }).populate('members', 'fullName role profilePicture')
+        .sort({ lastMessageAt: -1 });
 
         res.json(groups);
     } catch (err) {
@@ -65,7 +66,8 @@ exports.createGroup = async (req, res) => {
             createdBy: userId
         });
 
-        res.status(201).json(group);
+        const populated = await ChatGroup.findById(group._id).populate('members', 'fullName role profilePicture');
+        res.status(201).json(populated);
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -76,6 +78,7 @@ exports.openDM = async (req, res) => {
     try {
         const { targetUserId } = req.body;
         const { schoolId, _id: userId } = req.user;
+        console.log(`[CHAT] openDM: requester=${userId}, target=${targetUserId}, school=${schoolId}`);
 
         const targetObjectId = new mongoose.Types.ObjectId(targetUserId);
         const myObjectId = userId;
@@ -100,7 +103,8 @@ exports.openDM = async (req, res) => {
             });
         }
 
-        res.json(dm);
+        const populated = await ChatGroup.findById(dm._id).populate('members', 'fullName role profilePicture');
+        res.json(populated);
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -200,9 +204,16 @@ exports.getSchoolStaff = async (req, res) => {
             role: { $in: ['teacher', 'school_admin'] },
             _id: { $ne: userId },
             status: 'verified'
-        }).select('fullName role profilePicture info').lean();
+        }).select('_id fullName role profilePicture info').lean();
 
-        res.json(staff);
+        // Enhance school admin names for easier identification
+        const enhancedStaff = staff.map(s => ({
+            ...s,
+            fullName: s.role === 'school_admin' ? `${s.fullName} (School Admin)` : s.fullName
+        }));
+
+        console.log(`[CHAT] Found ${staff.length} staff members`);
+        res.json(enhancedStaff);
     } catch (err) {
         res.status(500).json({ message: err.message });
     }

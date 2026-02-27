@@ -22,7 +22,12 @@ router.use(authMiddleware);
 router.get('/dashboard/stats', authorize('school_admin'), schoolController.getDashboardStats);
 router.get('/teachers', authorize('school_admin'), schoolController.getAllTeachers);
 router.get('/students', authorize('school_admin'), schoolController.getAllStudents);
-router.get('/analytics/user-growth', authorize('school_admin'), schoolController.getUserGrowthAnalytics); // Added route
+router.get('/monitoring/exams', authorize('school_admin'), schoolController.getAdminExams);
+router.get('/monitoring/results', authorize('school_admin'), schoolController.getAdminResults);
+router.get('/monitoring/attendance', authorize('school_admin'), schoolController.getAdminTeacherAttendance);
+router.get('/analytics/user-growth', authorize('school_admin'), schoolController.getUserGrowthAnalytics);
+router.get('/analytics/performance', authorize('school_admin'), schoolController.getAdminAnalytics);
+router.get('/analytics/ai-insights', authorize('school_admin'), schoolController.getAISuggestions);
 router.get('/pending', authorize('school_admin'), schoolController.getPendingUsers);
 
 router.post('/invite/generate', authorize('school_admin'), schoolController.generateInvite);
@@ -44,5 +49,9 @@ router.post('/teacher/attendance', authorize('teacher'), schoolController.markAt
 router.get('/staff/attendance', authorize('teacher'), schoolController.getStaffAttendance);
 router.post('/staff/time-in', authorize('teacher'), schoolController.markStaffTimeIn);
 router.post('/staff/time-out', authorize('teacher'), schoolController.markStaffTimeOut);
+
+// Calls
+router.get('/calls/ongoing', authorize('school_admin', 'teacher'), schoolController.getOngoingCalls);
+router.get('/calls/history', authorize('school_admin', 'teacher'), schoolController.getCallHistory);
 
 module.exports = router;

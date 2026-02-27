@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { Server } = require('socket.io');
+const CallLog = require('./models/CallLog');
 
 dotenv.config();
 
@@ -142,33 +143,80 @@ io.on('connection', (socket) => {
         socket.leave(`chat_${groupId}`);
     });
 
-    // Join school staff room for group activity notifications
-    socket.on('join_school_staff', (schoolId) => {
-        socket.join(`school_staff_${schoolId}`);
-    });
-
     // Join personal notification room (every user joins their own room)
     socket.on('join_personal', (userId) => {
         socket.userId = userId; // store for later
         socket.join(`user_${userId}`);
     });
 
+    // Join school staff room for group activity notifications
+    socket.on('join_school_staff', (schoolId) => {
+        socket.schoolId = schoolId;
+        socket.join(`school_staff_${schoolId}`);
+    });
+
     // ─── CALL SIGNALING ───────────────────────────────────────────
     // Notify a specific user of an incoming call
-    socket.on('call_user', (data) => {
-        // data: { targetUserId, callerId, callerName, callerAvatar, callType, roomId }
+    socket.on('call_user', async (data) => {
+        // data: { targetUserId, callerId, callerName, callerAvatar, callType, roomId, schoolId }
+        console.log(`[CALL] call_user: from=${data.callerId} to=${data.targetUserId} room=${data.roomId}`);
+        
+        // Log the call start
+        try {
+            await CallLog.create({
+                schoolId: data.schoolId || socket.schoolId, // assume socket.schoolId if not provided
+                roomId: data.roomId,
+                callerId: data.callerId,
+                callerName: data.callerName,
+                receiverIds: [data.targetUserId],
+                callType: data.callType,
+                status: 'ongoing',
+                isGroup: false
+            });
+        } catch (err) {
+            console.error('Call logging error:', err);
+        }
+
         io.to(`user_${data.targetUserId}`).emit('incoming_call', {
             callerId: data.callerId,
             callerName: data.callerName,
             callerAvatar: data.callerAvatar,
             callType: data.callType,  // 'voice' | 'video'
-            roomId: data.roomId
+            roomId: data.roomId,
+            schoolId: data.schoolId
         });
+
+        // Broadcast to school staff that a call is ongoing (for joining)
+        if (data.schoolId || socket.schoolId) {
+            io.to(`school_staff_${data.schoolId || socket.schoolId}`).emit('ongoing_call_update', {
+                roomId: data.roomId,
+                callerName: data.callerName,
+                callType: data.callType,
+                status: 'ongoing'
+            });
+        }
     });
 
     // Notify multiple users at once (group call invite)
-    socket.on('call_group', (data) => {
-        // data: { targetUserIds[], callerId, callerName, callType, roomId, groupName }
+    socket.on('call_group', async (data) => {
+        // data: { targetUserIds[], callerId, callerName, callType, roomId, groupName, schoolId }
+        
+        try {
+            await CallLog.create({
+                schoolId: data.schoolId || socket.schoolId,
+                roomId: data.roomId,
+                callerId: data.callerId,
+                callerName: data.callerName,
+                receiverIds: data.targetUserIds,
+                groupName: data.groupName,
+                callType: data.callType,
+                status: 'ongoing',
+                isGroup: true
+            });
+        } catch (err) {
+            console.error('Group call logging error:', err);
+        }
+
         (data.targetUserIds || []).forEach(uid => {
             io.to(`user_${uid}`).emit('incoming_call', {
                 callerId: data.callerId,
@@ -176,9 +224,21 @@ io.on('connection', (socket) => {
                 callType: data.callType,
                 roomId: data.roomId,
                 groupName: data.groupName,
-                isGroup: true
+                isGroup: true,
+                schoolId: data.schoolId
             });
         });
+
+        if (data.schoolId || socket.schoolId) {
+            io.to(`school_staff_${data.schoolId || socket.schoolId}`).emit('ongoing_call_update', {
+                roomId: data.roomId,
+                callerName: data.callerName,
+                groupName: data.groupName,
+                callType: data.callType,
+                status: 'ongoing',
+                isGroup: true
+            });
+        }
     });
 
     // Call accepted - notify caller
@@ -192,17 +252,37 @@ io.on('connection', (socket) => {
     });
 
     // Call rejected
-    socket.on('call_rejected', (data) => {
+    socket.on('call_rejected', async (data) => {
         io.to(`user_${data.callerId}`).emit('call_rejected', {
             roomId: data.roomId,
             rejectorName: data.rejectorName
         });
+
+        // Update log
+        await CallLog.findOneAndUpdate({ roomId: data.roomId }, { status: 'rejected' });
     });
 
     // Call ended - broadcast to everyone in the room
-    socket.on('call_ended', (data) => {
+    socket.on('call_ended', async (data) => {
         if (data.roomId) {
             io.to(`call_${data.roomId}`).emit('call_ended', { endedBy: socket.id });
+            
+            // Update log
+            const call = await CallLog.findOne({ roomId: data.roomId });
+            if (call && call.status === 'ongoing') {
+                const endedAt = new Date();
+                const duration = Math.floor((endedAt - call.startedAt) / 1000);
+                call.status = 'ended';
+                call.endedAt = endedAt;
+                call.duration = duration;
+                await call.save();
+
+                // Notify staff that call ended
+                io.to(`school_staff_${call.schoolId}`).emit('ongoing_call_update', {
+                    roomId: data.roomId,
+                    status: 'ended'
+                });
+            }
         }
     });
 
@@ -212,13 +292,15 @@ io.on('connection', (socket) => {
         const roomName = `call_${roomId}`;
         // Get all existing sockets in the room
         const existingPeers = [...(io.sockets.adapter.rooms.get(roomName) || [])].filter(id => id !== socket.id);
-
+ 
+        console.log(`[CALL] ${userName} (${socket.id}) joining room ${roomId}. Existing peers:`, existingPeers);
+ 
         socket.join(roomName);
         socket.callRoom = roomId;
-
+ 
         // Tell the joiner who is already in the room
         socket.emit('call_room_peers', { peers: existingPeers, callType });
-
+ 
         // Tell all existing peers about the new joiner
         socket.to(roomName).emit('peer_joined_call', {
             peerId: socket.id,
@@ -226,34 +308,38 @@ io.on('connection', (socket) => {
             userName
         });
     });
-
+ 
     // Leave a call room
     socket.on('leave_call_room', ({ roomId }) => {
         const roomName = `call_${roomId}`;
+        console.log(`[CALL] socket ${socket.id} leaving room ${roomId}`);
         socket.to(roomName).emit('peer_left_call', { peerId: socket.id });
         socket.leave(roomName);
     });
-
+ 
     // ─── WebRTC RELAY ─────────────────────────────────────────────
     // Relay an SDP offer to a specific peer
     socket.on('rtc_offer', ({ targetSocketId, offer, roomId }) => {
+        console.log(`[WebRTC] Relay OFFER from ${socket.id} to ${targetSocketId}`);
         io.to(targetSocketId).emit('rtc_offer', {
             offer,
             fromSocketId: socket.id,
             roomId
         });
     });
-
+ 
     // Relay an SDP answer to a specific peer
     socket.on('rtc_answer', ({ targetSocketId, answer }) => {
+        console.log(`[WebRTC] Relay ANSWER from ${socket.id} to ${targetSocketId}`);
         io.to(targetSocketId).emit('rtc_answer', {
             answer,
             fromSocketId: socket.id
         });
     });
-
+ 
     // Relay ICE candidates
     socket.on('rtc_ice_candidate', ({ targetSocketId, candidate }) => {
+        // Log sparingly as candidates can be many
         io.to(targetSocketId).emit('rtc_ice_candidate', {
             candidate,
             fromSocketId: socket.id

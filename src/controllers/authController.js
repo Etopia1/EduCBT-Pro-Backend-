@@ -35,7 +35,7 @@ exports.login = async (req, res) => {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
 
-        console.log(`[LOGIN ATTEMPT] User: ${user.username}, Role: ${user.role}, Status: ${user.status}, Verified: ${user.verified}`);
+        console.log(`[LOGIN ATTEMPT] User: ${user.uniqueLoginId || user.username}, Role: ${user.role}, Status: ${user.status}, Verified: ${user.verified}`);
 
         // Check Verification Status
         if (!user.verified && user.role === 'school_admin') {
@@ -127,6 +127,7 @@ exports.login = async (req, res) => {
 
         // Construct response user object
         const userResponse = {
+            _id: user._id,
             id: user._id,
             schoolId: user.schoolId,
             schoolName: schoolName,
@@ -160,10 +161,18 @@ exports.login = async (req, res) => {
 };
 
 exports.sendOTP = async (req, res) => {
-    const { email } = req.body;
+    const { email, verificationId } = req.body;
     try {
-        const user = await User.findOne({ email });
-        if (!user) return res.status(404).json({ message: 'User with this email not found' });
+        let user;
+        if (verificationId) {
+            const token = await VerificationToken.findById(verificationId);
+            if (token) user = await User.findById(token.userId);
+        } else if (email) {
+            user = await User.findOne({ email });
+        }
+
+        if (!user) return res.status(404).json({ message: 'User not found' });
+        const userEmail = user.email;
 
         const { generateOTP } = require('../utils/otp');
         const otp = generateOTP();
@@ -179,9 +188,13 @@ exports.sendOTP = async (req, res) => {
         await otpToken.save();
 
         const { sendOTPEmail } = require('../utils/emailService');
-        await sendOTPEmail(email, otp);
+        console.log(`[AUTH] Generated OTP for ${userEmail}: ${otp}`); // Added per USER request
+        await sendOTPEmail(userEmail, otp);
 
-        res.json({ message: 'OTP sent to your email' });
+        res.json({ 
+            message: 'OTP sent to your email',
+            verificationId: otpToken._id 
+        });
     } catch (error) {
         console.error('OTP Send Error:', error);
         res.status(500).json({ message: 'Error sending OTP' });
@@ -189,21 +202,30 @@ exports.sendOTP = async (req, res) => {
 };
 
 exports.verifyOTP = async (req, res) => {
-    const { email, otp } = req.body;
+    const { email, otp, verificationId } = req.body;
     try {
-        const user = await User.findOne({ email });
-        if (!user) return res.status(404).json({ message: 'User not found' });
+        let otpToken;
+        if (verificationId) {
+            otpToken = await VerificationToken.findById(verificationId);
+        } else if (email) {
+            // Fallback for legacy clients if necessary
+            const user = await User.findOne({ email });
+            if (user) {
+                otpToken = await VerificationToken.findOne({ 
+                    userId: user._id, 
+                    modelType: 'User', 
+                    otp,
+                    used: false
+                });
+            }
+        }
 
-        const otpToken = await VerificationToken.findOne({ 
-            userId: user._id, 
-            modelType: 'User', 
-            otp,
-            used: false
-        });
-
-        if (!otpToken || otpToken.expiresAt < new Date()) {
+        if (!otpToken || otpToken.otp !== otp || otpToken.expiresAt < new Date()) {
             return res.status(400).json({ message: 'Invalid or expired OTP' });
         }
+
+        const user = await User.findById(otpToken.userId);
+        if (!user) return res.status(404).json({ message: 'User not found' });
 
         otpToken.used = true;
         await otpToken.save();
@@ -213,9 +235,46 @@ exports.verifyOTP = async (req, res) => {
         await user.save();
 
         const token = generateToken(user._id, user.role);
-        res.json({ message: 'OTP verified successfully', token, user });
+        // Construct response user object consistently
+        let schoolName = 'School Management System';
+        if (user.schoolId) {
+            const School = require('../models/School');
+            const school = await School.findById(user.schoolId);
+            if (school) schoolName = school.name;
+        }
+
+        const userResponse = {
+            _id: user._id,
+            id: user._id,
+            schoolId: user.schoolId,
+            schoolName: schoolName,
+            uniqueLoginId: user.uniqueLoginId,
+            role: user.role,
+            fullName: user.fullName,
+            info: user.info
+        };
+
+        res.json({ message: 'OTP verified successfully', token, user: userResponse });
     } catch (error) {
         console.error('OTP Verify Error:', error);
         res.status(500).json({ message: 'Error verifying OTP' });
+    }
+};
+
+exports.resetPassword = async (req, res) => {
+    const { password } = req.body;
+    try {
+        if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+        
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        user.password = password; // pre-save hook will hash it
+        await user.save();
+
+        res.json({ message: 'Password reset successfully' });
+    } catch (error) {
+        console.error('Reset Password Error:', error);
+        res.status(500).json({ message: 'Error resetting password' });
     }
 };

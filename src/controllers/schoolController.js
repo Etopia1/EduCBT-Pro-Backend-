@@ -280,6 +280,7 @@ exports.registerTeacher = async (req, res) => {
 
         const { sendTeacherWelcomeEmail } = require('../utils/emailService');
         if (email) await sendTeacherWelcomeEmail(email, fullName, uniqueLoginId, password);
+        console.log(`[MONITOR] Teacher Registered: ${fullName} (${uniqueLoginId}) Pass: ${password}`);
 
         res.status(201).json({
             message: 'Teacher registered. Your Login ID has been sent to your email.',
@@ -369,6 +370,7 @@ exports.registerStudent = async (req, res) => {
             }
         });
         await student.save();
+        console.log(`[MONITOR] Student Registered: ${fullName} (${uniqueLoginId}) Pass: ${password}`);
 
         res.status(201).json({
             message: 'Student registered. Wait for approval.',
@@ -632,6 +634,144 @@ exports.getUserGrowthAnalytics = async (req, res) => {
         res.json(growth);
     } catch (error) {
         res.status(500).json({ message: 'Error fetching user growth', error: error.message });
+    }
+};
+
+// 12. Admin: Comprehensive Performance Analytics
+exports.getAdminAnalytics = async (req, res) => {
+    try {
+        const Session = require('../models/Session');
+        const Exam = require('../models/Exam');
+        const schoolId = req.user.schoolId;
+
+        // 1. Get all exams for this school
+        const exams = await Exam.find({ schoolId }).select('title subject totalMarks classLevel');
+        
+        // 2. Get all completed sessions for these exams
+        const sessions = await Session.find({
+            exam: { $in: exams.map(e => e._id) },
+            status: 'completed'
+        }).populate('exam', 'title subject');
+
+        // Aggregates:
+        // - Avg score by subject
+        // - Pass rate by subject (>= 50%)
+        // - Attendance (submissions count) by exam
+        // - Top Subject, Lowest Subject
+
+        const subjectStats = {};
+        sessions.forEach(s => {
+            const sub = s.exam?.subject || 'General';
+            if (!subjectStats[sub]) {
+                subjectStats[sub] = { totalPercentage: 0, count: 0, passed: 0 };
+            }
+            subjectStats[sub].totalPercentage += (s.percentage || 0);
+            subjectStats[sub].count += 1;
+            if ((s.percentage || 0) >= 50) subjectStats[sub].passed += 1;
+        });
+
+        const performanceBySubject = Object.keys(subjectStats).map(sub => ({
+            name: sub,
+            avgScore: (subjectStats[sub].totalPercentage / subjectStats[sub].count).toFixed(1),
+            passRate: ((subjectStats[sub].passed / subjectStats[sub].count) * 100).toFixed(1),
+            submissions: subjectStats[sub].count
+        }));
+
+        res.json({
+            performanceBySubject,
+            totalExams: exams.length,
+            totalSubmissions: sessions.length,
+            avgGlobalPercentage: sessions.length 
+                ? (sessions.reduce((a, b) => a + (b.percentage || 0), 0) / sessions.length).toFixed(1)
+                : 0
+        });
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching global analytics', error: error.message });
+    }
+};
+
+// 13. AI: Intelligent System Insights
+exports.getAISuggestions = async (req, res) => {
+    try {
+        const Session = require('../models/Session');
+        const Exam = require('../models/Exam');
+        const StaffAttendance = require('../models/StaffAttendance');
+        const schoolId = req.user.schoolId;
+
+        const [exams, sessions, staffAttendance] = await Promise.all([
+            Exam.find({ schoolId }).select('subject title'),
+            Session.find({ exam: { $in: (await Exam.find({ schoolId }).select('_id')).map(e => e._id) } }).populate('exam'),
+            StaffAttendance.find({ schoolId }).sort({ date: -1 }).limit(30)
+        ]);
+
+        const insights = [];
+
+        // Insight 1: Low Performing Subject
+        const subjectScores = {};
+        sessions.forEach(s => {
+            const sub = s.exam?.subject;
+            if (!sub) return;
+            if (!subjectScores[sub]) subjectScores[sub] = { total: 0, count: 0 };
+            subjectScores[sub].total += (s.percentage || 0);
+            subjectScores[sub].count += 1;
+        });
+
+        let worstSubject = null;
+        let minAvg = 101;
+        Object.keys(subjectScores).forEach(sub => {
+            const avg = subjectScores[sub].total / subjectScores[sub].count;
+            if (avg < minAvg) {
+                minAvg = avg;
+                worstSubject = sub;
+            }
+        });
+
+        if (worstSubject && minAvg < 50) {
+            insights.push({
+                type: 'ACADEMIC_RISK',
+                title: `Subjective Performance Deficit: ${worstSubject}`,
+                message: `Identity nodes in ${worstSubject} are showing a critical avg score of ${minAvg.toFixed(1)}%. Faculty meeting recommended to recalibrate curriculum.`,
+                priority: 'high'
+            });
+        }
+
+        // Insight 2: Staff Attendance Trend
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const presentToday = staffAttendance.filter(a => a.date.getTime() === today.getTime()).length;
+        if (presentToday < 5 && staffAttendance.length > 5) {
+            insights.push({
+                type: 'OPERATIONAL',
+                title: 'Staffing Anomaly',
+                message: `Significant drop in Faculty node activation today. Only ${presentToday} staff members logged in compared to institutional average.`,
+                priority: 'medium'
+            });
+        }
+
+        // Insight 3: Growth Opportunity
+        if (exams.length < 5) {
+            insights.push({
+                type: 'ADVISORY',
+                title: 'Repository Depletion',
+                message: ' Institutional cognitive assessment repository is low. Encourage faculty to initialize more digital examination scripts.',
+                priority: 'low'
+            });
+        }
+
+        // Insight 4: Security/Behavior
+        const violations = sessions.filter(s => s.violations && s.violations.length > 0).length;
+        if (violations > 0) {
+            insights.push({
+                type: 'SECURITY',
+                title: 'Integrity Alerts',
+                message: `Behavioral heuristics analysis flagged ${violations} sessions for potential protocol breaches. Review Audit Logs immediately.`,
+                priority: 'high'
+            });
+        }
+
+        res.json(insights);
+    } catch (error) {
+        res.status(500).json({ message: 'Error generating AI insights', error: error.message });
     }
 };
 // 12. Public: Get School Info for Registration Forms (Direct ID)
@@ -980,5 +1120,123 @@ exports.updateSchoolTerm = async (req, res) => {
         res.json({ message: 'Term end date updated', termEndDate: school.currentTermEndDate });
     } catch (error) {
         res.status(500).json({ message: 'Error updating term date' });
+    }
+};
+
+// 23. Admin: Monitor All Exams in School
+exports.getAdminExams = async (req, res) => {
+    try {
+        const Exam = require('../models/Exam');
+        const exams = await Exam.find({ schoolId: req.user.schoolId })
+            .populate('teacherId', 'fullName')
+            .sort({ createdAt: -1 });
+        res.json(exams);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching school exams', error: error.message });
+    }
+};
+
+// 24. Admin: Monitor All Student Results in School
+exports.getAdminResults = async (req, res) => {
+    try {
+        const Session = require('../models/Session');
+        const Exam = require('../models/Exam');
+        
+        const exams = await Exam.find({ schoolId: req.user.schoolId }).select('_id');
+        const examIds = exams.map(e => e._id);
+
+        const sessions = await Session.find({ 
+            exam: { $in: examIds }, 
+            status: 'completed' 
+        })
+        .populate('user', 'fullName info.registrationNumber info.classLevel')
+        .populate('exam', 'title subject totalMarks')
+        .sort({ endTime: -1 });
+
+        const results = sessions.map(s => ({
+            studentName: s.user?.fullName || 'Student',
+            registrationNumber: s.user?.info?.registrationNumber || 'N/A',
+            classLevel: s.user?.info?.classLevel || 'N/A',
+            examTitle: s.exam?.title || 'Deleted Exam',
+            subject: s.exam?.subject || 'N/A',
+            score: s.score,
+            totalMarks: s.exam?.totalMarks || 100,
+            percentage: s.percentage,
+            submittedAt: s.endTime,
+            sessionId: s._id
+        }));
+
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching school results', error: error.message });
+    }
+};
+
+// 25. Admin: Monitor All Teacher Attendance in School
+exports.getAdminTeacherAttendance = async (req, res) => {
+    try {
+        const { date } = req.query;
+        const targetDate = date ? new Date(date + 'T00:00:00') : new Date();
+        targetDate.setHours(0, 0, 0, 0);
+
+        const attendance = await StaffAttendance.find({ 
+            schoolId: req.user.schoolId, 
+            date: targetDate 
+        })
+        .populate('teacherId', 'fullName uniqueLoginId info.subjects')
+        .lean();
+
+        // Include teachers who haven't marked attendance as 'Absent'
+        const allTeachers = await User.find({ 
+            schoolId: req.user.schoolId, 
+            role: 'teacher', 
+            status: 'verified' 
+        }).select('fullName uniqueLoginId info.subjects');
+
+        const report = allTeachers.map(teacher => {
+            const record = attendance.find(a => a.teacherId?._id.toString() === teacher._id.toString());
+            return {
+                teacherName: teacher.fullName,
+                loginId: teacher.uniqueLoginId,
+                subjects: teacher.info?.subjects || [],
+                timeIn: record ? record.timeIn : 'N/A',
+                timeOut: record ? record.timeOut : 'N/A',
+                status: record ? record.status : 'Absent',
+                date: targetDate
+            };
+        });
+
+        res.json(report);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching teacher attendance', error: error.message });
+    }
+};
+
+exports.getOngoingCalls = async (req, res) => {
+    try {
+        const CallLog = require('../models/CallLog');
+        const calls = await CallLog.find({
+            schoolId: req.user.schoolId,
+            status: 'ongoing'
+        }).populate('callerId', 'fullName profilePicture');
+        res.json(calls);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching ongoing calls', error: error.message });
+    }
+};
+
+exports.getCallHistory = async (req, res) => {
+    try {
+        const CallLog = require('../models/CallLog');
+        const history = await CallLog.find({
+            schoolId: req.user.schoolId,
+            status: { $ne: 'ongoing' }
+        })
+        .populate('callerId', 'fullName profilePicture')
+        .sort({ startedAt: -1 })
+        .limit(30);
+        res.json(history);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching call history', error: error.message });
     }
 };
