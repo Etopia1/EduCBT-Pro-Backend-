@@ -12,7 +12,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: [process.env.FRONTEND_URL, "http://localhost:5173", "http://localhost:5174", "http://localhost:5175"],
+        origin: [process.env.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://localhost:5175"],
         methods: ["GET", "POST"]
     }
 });
@@ -21,7 +21,7 @@ global.io = io; // Set global access for activity logging helper
 
 // Middleware
 app.use(cors({
-    origin: [process.env.FRONTEND_URL, "http://localhost:5173", "http://localhost:5174", "http://localhost:5175"],
+    origin: [process.env.FRONTEND_URL, "http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://localhost:5175"],
     credentials: true
 }));
 app.use(express.json());
@@ -160,7 +160,7 @@ io.on('connection', (socket) => {
     socket.on('call_user', async (data) => {
         // data: { targetUserId, callerId, callerName, callerAvatar, callType, roomId, schoolId }
         console.log(`[CALL] call_user: from=${data.callerId} to=${data.targetUserId} room=${data.roomId}`);
-        
+
         // Log the call start
         try {
             await CallLog.create({
@@ -200,7 +200,7 @@ io.on('connection', (socket) => {
     // Notify multiple users at once (group call invite)
     socket.on('call_group', async (data) => {
         // data: { targetUserIds[], callerId, callerName, callType, roomId, groupName, schoolId }
-        
+
         try {
             await CallLog.create({
                 schoolId: data.schoolId || socket.schoolId,
@@ -266,7 +266,7 @@ io.on('connection', (socket) => {
     socket.on('call_ended', async (data) => {
         if (data.roomId) {
             io.to(`call_${data.roomId}`).emit('call_ended', { endedBy: socket.id });
-            
+
             // Update log
             const call = await CallLog.findOne({ roomId: data.roomId });
             if (call && call.status === 'ongoing') {
@@ -292,15 +292,15 @@ io.on('connection', (socket) => {
         const roomName = `call_${roomId}`;
         // Get all existing sockets in the room
         const existingPeers = [...(io.sockets.adapter.rooms.get(roomName) || [])].filter(id => id !== socket.id);
- 
+
         console.log(`[CALL] ${userName} (${socket.id}) joining room ${roomId}. Existing peers:`, existingPeers);
- 
+
         socket.join(roomName);
         socket.callRoom = roomId;
- 
+
         // Tell the joiner who is already in the room
         socket.emit('call_room_peers', { peers: existingPeers, callType });
- 
+
         // Tell all existing peers about the new joiner
         socket.to(roomName).emit('peer_joined_call', {
             peerId: socket.id,
@@ -308,7 +308,7 @@ io.on('connection', (socket) => {
             userName
         });
     });
- 
+
     // Leave a call room
     socket.on('leave_call_room', ({ roomId }) => {
         const roomName = `call_${roomId}`;
@@ -316,7 +316,7 @@ io.on('connection', (socket) => {
         socket.to(roomName).emit('peer_left_call', { peerId: socket.id });
         socket.leave(roomName);
     });
- 
+
     // ─── WebRTC RELAY ─────────────────────────────────────────────
     // Relay an SDP offer to a specific peer
     socket.on('rtc_offer', ({ targetSocketId, offer, roomId }) => {
@@ -327,7 +327,7 @@ io.on('connection', (socket) => {
             roomId
         });
     });
- 
+
     // Relay an SDP answer to a specific peer
     socket.on('rtc_answer', ({ targetSocketId, answer }) => {
         console.log(`[WebRTC] Relay ANSWER from ${socket.id} to ${targetSocketId}`);
@@ -336,7 +336,7 @@ io.on('connection', (socket) => {
             fromSocketId: socket.id
         });
     });
- 
+
     // Relay ICE candidates
     socket.on('rtc_ice_candidate', ({ targetSocketId, candidate }) => {
         // Log sparingly as candidates can be many
